@@ -9,7 +9,6 @@ import (
 	"github.com/eshaffer321/monarchmoney-go/internal/graphql"
 	"github.com/eshaffer321/monarchmoney-go/internal/transport"
 	internalTypes "github.com/eshaffer321/monarchmoney-go/internal/types"
-	"github.com/getsentry/sentry-go"
 )
 
 const (
@@ -74,12 +73,6 @@ type ClientOptions struct {
 
 	// Hooks for observability
 	Hooks *internalTypes.Hooks
-
-	// SentryDSN enables Sentry error tracking when set
-	SentryDSN string
-
-	// SentryOptions allows custom Sentry configuration
-	SentryOptions *sentry.ClientOptions
 }
 
 // Logger interface for logging
@@ -106,34 +99,6 @@ type Transport interface {
 func NewClient(opts *ClientOptions) (*Client, error) {
 	if opts == nil {
 		opts = &ClientOptions{}
-	}
-
-	// Initialize Sentry if DSN is provided
-	if opts.SentryDSN != "" || opts.SentryOptions != nil {
-		sentryOpts := sentry.ClientOptions{}
-
-		// Use provided options if available, otherwise create new ones
-		if opts.SentryOptions != nil {
-			sentryOpts = *opts.SentryOptions
-		}
-
-		// Override DSN if provided separately
-		if opts.SentryDSN != "" {
-			sentryOpts.Dsn = opts.SentryDSN
-		}
-
-		// Set default environment if not provided
-		if sentryOpts.Environment == "" {
-			sentryOpts.Environment = "production"
-		}
-
-		// Initialize Sentry
-		if err := sentry.Init(sentryOpts); err != nil {
-			// Log error but don't fail client creation
-			if opts.Logger != nil {
-				opts.Logger.Error("Failed to initialize Sentry", "error", err)
-			}
-		}
 	}
 
 	// Set defaults
@@ -262,12 +227,6 @@ func (c *Client) executeGraphQL(ctx context.Context, query string, variables map
 	// Rate limiting
 	if c.options.RateLimiter != nil {
 		if err := c.options.RateLimiter.Wait(ctx); err != nil {
-			// Capture rate limiter errors in Sentry
-			if hub := sentry.GetHubFromContext(ctx); hub != nil {
-				hub.CaptureException(err)
-			} else {
-				sentry.CaptureException(err)
-			}
 			return fmt.Errorf("rate limiter: %w", err)
 		}
 	}
@@ -276,32 +235,6 @@ func (c *Client) executeGraphQL(ctx context.Context, query string, variables map
 	start := time.Now()
 	err := c.transport.Execute(ctx, query, variables, result)
 	duration := time.Since(start)
-
-	// Capture errors in Sentry
-	if err != nil {
-		// Add context to Sentry
-		if hub := sentry.GetHubFromContext(ctx); hub != nil {
-			hub.WithScope(func(scope *sentry.Scope) {
-				scope.SetTag("graphql.operation", extractOperationName(query))
-				scope.SetContext("graphql", map[string]interface{}{
-					"query":     query,
-					"variables": variables,
-					"duration":  duration.String(),
-				})
-				hub.CaptureException(err)
-			})
-		} else {
-			sentry.WithScope(func(scope *sentry.Scope) {
-				scope.SetTag("graphql.operation", extractOperationName(query))
-				scope.SetContext("graphql", map[string]interface{}{
-					"query":     query,
-					"variables": variables,
-					"duration":  duration.String(),
-				})
-				sentry.CaptureException(err)
-			})
-		}
-	}
 
 	// Response hook
 	if c.options.Hooks != nil && c.options.Hooks.OnResponse != nil {
@@ -321,16 +254,12 @@ func (c *Client) executeGraphQL(ctx context.Context, query string, variables map
 	return err
 }
 
-// Close flushes any pending Sentry events and performs cleanup
-func (c *Client) Close() {
-	// Flush Sentry events with a 2 second timeout
-	sentry.Flush(2 * time.Second)
-}
+// Close performs cleanup
+func (c *Client) Close() {}
 
 // extractOperationName extracts the GraphQL operation name from a query
 func extractOperationName(query string) string {
 	// Simple extraction - looks for "query OperationName" or "mutation OperationName"
-	// This is a basic implementation; you might want to use a proper GraphQL parser
 	for _, prefix := range []string{"query ", "mutation ", "subscription "} {
 		if idx := findOperationName(query, prefix); idx != "" {
 			return idx
